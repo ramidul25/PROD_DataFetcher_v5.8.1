@@ -1,0 +1,221 @@
+"""
+************************************************************
+*  DataFetcher - v5.8.1    (Will Expire on 31-03-2026)     *
+*  Designed for: ASDA NewCo Environment                    *
+*  Developed by: TCS-Network Team (Ramidul)                *
+*  Copyright © 2025 TCS-Network Team. All Rights Reserved. *
+*  Unauthorized distribution or modification is prohibited.*
+************************************************************
+"""
+
+import paramiko
+import os
+import getpass
+import time
+import keyring
+import logging
+from logging.handlers import RotatingFileHandler
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+import sys
+from colorama import init
+from termcolor import colored
+
+expiry_date = datetime(2026, 3, 31)  # Set your expiry date here
+
+if datetime.now() > expiry_date:
+    print("This version has expired. Please contact the owner for the updated version.")
+    sys.exit(1)
+
+# ===================== Identification Header =====================
+SCRIPT_VERSION = "5.8.1"
+DEVELOPER_INFO = "Developed by: TCS - Network Team (Ramidul)"
+ENVIRONMENT_INFO = "Designed for: ASDA NewCo Environment"
+ENVIRONMENT_INFO1 = "Copyright © 2025 TCS-Network Team. All Rights Reserved."
+ENVIRONMENT_INFO2 = "Unauthorized distribution or modification is prohibited."
+
+# Initialize colorama for Windows support
+init(autoreset=True)
+
+def clear_screen():
+    """Clear terminal before re-printing the banner."""
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def print_banner():
+    clear_screen()
+    border = colored("-" * 70, "white", attrs=["bold"])
+    top_border = colored("*" * 70, "cyan", attrs=["bold"])
+    timestamp = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+
+    print("\n" + top_border)
+    print(colored(f"DataFetcher - v{SCRIPT_VERSION}", "cyan", attrs=["bold"]))
+    print(border)
+    print(colored(DEVELOPER_INFO, "yellow"))
+    print(colored(ENVIRONMENT_INFO, "green"))
+    print(colored(ENVIRONMENT_INFO1, "green"))
+    print(colored(ENVIRONMENT_INFO2, "red"))
+    print(border + "\n")
+    print(colored(f"Session started: {timestamp}", "magenta"))
+    print(top_border + "\n")
+
+
+# Custom filter to allow only "Commands executed" and "Error connecting" in file logs
+class CommandErrorFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        return msg.startswith("Commands executed") or msg.startswith("Error connecting")
+
+# Master logger
+logger = logging.getLogger("DataFetcher")
+logger.setLevel(logging.DEBUG)
+
+# ---- File Handler (only filtered logs written) ----
+log_file = "DataFetcher_log.txt"
+file_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)
+file_formatter = logging.Formatter("%(asctime)s - %(message)s")
+file_handler.setFormatter(file_formatter)
+file_handler.addFilter(CommandErrorFilter())
+logger.addHandler(file_handler)
+
+# Silence Paramiko noise
+logging.getLogger("paramiko").setLevel(logging.WARNING)
+
+def validate_ssh_credentials(username, password, test_host="ra.s05722.asda.uk", port=22):
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(test_host, port=port, username=username, password=password, timeout=5)
+        client.close()
+        return True
+    except Exception:
+        return False
+
+def get_or_prompt_credentials(service_name):
+    username = os.getenv("SSH_USERNAME") or keyring.get_password(service_name, "username")
+    password = os.getenv("SSH_PASSWORD") or keyring.get_password(service_name, "password")
+    while not username or not password or not validate_ssh_credentials(username, password):
+        print("Invalid or missing credentials. Please enter valid SSH credentials.")
+        username = input("Enter SSH username: ")
+        password = getpass.getpass("Enter SSH password: ")
+        if validate_ssh_credentials(username, password):
+            keyring.set_password(service_name, "username", username)
+            keyring.set_password(service_name, "password", password)
+            break
+        else:
+            print("Login failed. Try again.")
+    return username, password
+
+def ssh_to_router(host, port, username, password, commands, site_folder):
+    try:
+        ssh_client = paramiko.SSHClient()
+        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        logger.info(f"Connecting to {host}...")
+        ssh_client.connect(hostname=host, port=port, username=username, password=password, timeout=10)
+        shell = ssh_client.invoke_shell()
+        shell.send("terminal length 0\n")
+        shell.send("show version | i up|physical|flash|throughput|Base|Model|System\n")
+        time.sleep(1)
+        os.makedirs(site_folder, exist_ok=True)
+        file_path = os.path.join(site_folder, f"{host}.txt")
+        with open(file_path, "w") as file:
+            for command in commands:
+                shell.send(command + "\n")
+                time.sleep(1)
+                output = ""
+                start_time = time.time()
+                while True:
+                    if shell.recv_ready():
+                        data = shell.recv(65535).decode()
+                        output += data
+                    time.sleep(0.5)
+                    if time.time() - start_time > 5:
+                        break
+                file.write(output.strip() + "\n")
+        logger.info(f"Commands executed on {host}. Output saved in {file_path}")
+        shell.close()
+        ssh_client.close()
+        return True
+    
+    except Exception:
+        logger.error(f"Error connecting to {host}. Device is unreachable or unavailable in the environment.")
+        return False
+
+def process_site(site_name, username, password, ssh_port, commands, main_folder):
+    site_folder = os.path.join(main_folder, f"{site_name}")
+    router_hosts = [
+        f"ra.s0{site_name}.asda.uk",
+        f"rb.s0{site_name}.asda.uk",
+        f"supc1.s0{site_name}.asda.uk",
+        f"sgrc1.s0{site_name}.asda.uk",
+        f"sgrc2.s0{site_name}.asda.uk",
+        f"sgm1.s0{site_name}.asda.uk",
+        f"sgm2.s0{site_name}.asda.uk",
+        f"shs1.s0{site_name}.asda.uk",
+        f"shs2.s0{site_name}.asda.uk",
+        f"shoarea1.s0{site_name}.asda.uk",
+        f"shoarea2.s0{site_name}.asda.uk"
+    ]
+    success = False
+    with ThreadPoolExecutor(max_workers=len(router_hosts)) as executor:
+        futures = {executor.submit(ssh_to_router, host, ssh_port, username, password, commands, site_folder): host for host in router_hosts}
+        for future in as_completed(futures):
+            if future.result():
+                success = True
+    return success
+
+if __name__ == "__main__":
+    service_name = "asda_ssh"
+    username, password = get_or_prompt_credentials(service_name)
+    ssh_port = 22
+
+    while True:
+        print_banner()
+        print(colored("\nWelcome to the DataFetcher Tool !!", "cyan", attrs=["bold"]))
+        print(colored("\n1. Device Configuration Backup", "green"))
+        print(colored("2. Pre / Post Check of Planned Outage", "green"))
+        print(colored("\nq. Quit", "red"))
+
+        choice = input(colored("\nSelect an option: ", "yellow")).strip().lower()
+        if choice == 'q':
+            break
+        elif choice == '1':
+            commands = ["show inventory", "show platform", "show running-config", "show clock"]
+        elif choice == '2':
+            commands = ["write memory", "show running-config", "show inventory", "show platform",
+                        "show environment all", "show boot", "show interface description", "show switch",
+                        "show interface description | i APUK|POS", "show interface status | i connected",
+                        "show power inline | i on", "show cdp neighbors", "show ip interface brief",
+                        "show ip bgp vpnv4 all sum | b N","show standby brief", "show logging", "show clock"]
+        else:
+            print("Invalid option. Try again.")
+            continue
+
+        print(colored("\nYou are about to run the following commands:\n", "cyan"))
+        for cmd in commands:
+            print(colored(f"- {cmd}","grey"))
+        confirm = input(colored("\nProceed? (y/n):", "yellow")).strip().lower()
+        if confirm != 'y':
+            continue
+
+        site_input = input(colored("Enter site number(s) (comma-separated, no spaces) or 'q' to quit: ", "yellow")).strip()
+        if site_input.lower() == 'q':
+            break
+
+        site_numbers = site_input.split(",")
+        current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        main_folder = f"Data_{current_datetime}"
+        os.makedirs(main_folder, exist_ok=True)
+
+        success_flag = False
+        with ThreadPoolExecutor(max_workers=len(site_numbers)) as executor:
+            futures = {executor.submit(process_site, site, username, password, ssh_port, commands, main_folder): site for site in site_numbers}
+            for future in as_completed(futures):
+                if future.result():
+                    success_flag = True
+
+        if success_flag:
+            print("\n✅ Task executed successfully on the reachable devices.")
+            input("\nPress Enter to return to the main menu...")
+        else:
+            print("\n❌ No valid sites found. Please try again.")
+            input("\nPress 'm' to return to the main menu : ")
